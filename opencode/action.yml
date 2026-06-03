@@ -12,6 +12,7 @@ inputs:
   agent:
     description: "Agent to use. Must be a primary agent. Falls back to default_agent from config or 'build' if not found."
     required: false
+    default: "build"
 
   share:
     description: "Share the opencode session (defaults to true for public repos)"
