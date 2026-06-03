@@ -67,9 +67,7 @@ runs:
     - name: Run opencode
       shell: bash
       id: run_opencode
-      run: |
-        [ -n "$MODEL" ] && export MODEL
-        opencode github run
+      run: opencode github run
       env:
         MODEL: ${{ inputs.model }}
         AGENT: ${{ inputs.agent }}
