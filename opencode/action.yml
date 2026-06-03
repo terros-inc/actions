@@ -68,12 +68,10 @@ runs:
       shell: bash
       id: run_opencode
       run: |
-        if [ -n "$MODEL_INPUT" ]; then
-          export MODEL="$MODEL_INPUT"
-        fi
+        [ -n "$MODEL" ] && export MODEL
         opencode github run
       env:
-        MODEL_INPUT: ${{ inputs.model }}
+        MODEL: ${{ inputs.model }}
         AGENT: ${{ inputs.agent }}
         SHARE: ${{ inputs.share }}
         PROMPT: ${{ inputs.prompt }}
