@@ -6,8 +6,8 @@ branding:
 
 inputs:
   model:
-    description: "Model to use"
-    required: true
+    description: "Model to use in provider/model format. Falls back to agent config in opencode.json if not set."
+    required: false
 
   agent:
     description: "Agent to use. Must be a primary agent. Falls back to default_agent from config or 'build' if not found."
