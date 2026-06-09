@@ -68,8 +68,6 @@ runs:
         ocr config set llm.use_anthropic false
         if [ "${{ inputs.reasoning }}" = "true" ]; then
           ocr config set llm.extra_body '{"reasoning": {"effort": "${{ inputs.reasoning_effort }}"}}'
-        else
-          ocr config set llm.extra_body '{"reasoning": {"effort": "none"}}'
         fi
 
         echo "Reviewing ${{ inputs.head_sha }} against ${{ inputs.base_ref }}"
