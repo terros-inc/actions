@@ -109,7 +109,7 @@ runs:
           const warnings = result.warnings || [];
 
           if (comments.length === 0) {
-            if (result.summary.files_reviewed === 0) return
+            if (!result.summary?.files_reviewed) return
             const message = result.message || 'No issues found. LGTM!';
             await github.rest.issues.createComment({
               owner: context.repo.owner,
