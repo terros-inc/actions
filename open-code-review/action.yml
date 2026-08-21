@@ -17,7 +17,7 @@ inputs:
   model:
     description: "LLM model to use (provider/model format)"
     required: false
-    default: "deepseek/deepseek-v4-pro"
+    default: "@preset/code-review"
 
   base_ref:
     description: "Base branch ref to diff against (e.g., origin/main)"
