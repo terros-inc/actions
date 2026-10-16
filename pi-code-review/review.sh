@@ -107,6 +107,18 @@ with open(sys.argv[1], "w", encoding="utf-8") as output:
     json.dump(config, output)
 PY
 
+if [[ -n "${LINEAR_API_KEY:-}" ]]; then
+  LINEAR_READ_URL="http://$bridge_ip:$proxy_port" \
+    python3 - "$review_dir/context/linear.json" <<'PY'
+import json
+import os
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    json.dump({"baseUrl": os.environ["LINEAR_READ_URL"]}, output)
+PY
+fi
+
 {
   printf 'Review pull request #%s in %s at commit %s.\n' "$PR_NUMBER" "$REVIEW_REPOSITORY" "$HEAD_SHA"
   printf 'The PR evidence is in /review/context and the committed source is in /workspace.\n'
@@ -116,7 +128,9 @@ PY
 } > "$review_dir/context/request.txt"
 
 # Docker receives only explicitly listed variables and mounts. In particular,
-# GH_TOKEN, OPENROUTER_API_KEY, the runner checkout, and Docker's socket stay out.
+# GH_TOKEN, OPENROUTER_API_KEY, LINEAR_API_KEY, the runner checkout, and
+# Docker's socket stay out. Linear reuses the independent, temporary model
+# proxy token; its actual API key remains in the host proxy process.
 docker run --rm --read-only --user "$(id -u):$(id -g)" \
   --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 \
   --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \

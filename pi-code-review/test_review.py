@@ -140,6 +140,158 @@ class ProxyTests(unittest.TestCase):
             upstream.server_close()
 
 
+class LinearProxyTests(unittest.TestCase):
+    def setUp(self):
+        self.received = []
+        self.upstream_payload = {"data": {"semanticSearch": {"results": [
+            {"id": "issue-id", "type": "issue", "issue": {"identifier": "TECH-123", "title": "Related work"}}
+        ]}}}
+        self.upstream_status = 200
+        self.upstream_raw = None
+        self.redirect_url = None
+        case = self
+
+        class Upstream(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                size = int(self.headers["Content-Length"])
+                case.received.append((self.path, self.headers.get("Authorization"),
+                                      json.loads(self.rfile.read(size))))
+                body = case.upstream_raw if case.upstream_raw is not None else json.dumps(case.upstream_payload).encode()
+                self.send_response(case.upstream_status)
+                self.send_header("Content-Type", "application/json")
+                if case.redirect_url:
+                    self.send_header("Location", case.redirect_url)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                case.received.append((self.path, None, None))
+                self.send_response(200)
+                self.end_headers()
+
+        self.upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+        self.proxy = ThreadingHTTPServer(("127.0.0.1", 0), model_proxy.Handler)
+        self.proxy.proxy_token = "independent-session-token"
+        self.proxy.provider_key = "model-secret"
+        self.proxy.linear_key = "host-only-linear-secret"
+        self.proxy.model_id = "model"
+        self.proxy.opener = model_proxy.build_opener(model_proxy.NoRedirect)
+        self.patch_upstream = patch.object(
+            model_proxy, "LINEAR_UPSTREAM_URL",
+            f"http://127.0.0.1:{self.upstream.server_port}/graphql",
+        )
+        self.patch_upstream.start()
+        self.addCleanup(self.patch_upstream.stop)
+        self.addCleanup(self.proxy.server_close)
+        self.addCleanup(self.upstream.server_close)
+        self.addCleanup(self.proxy.shutdown)
+        self.addCleanup(self.upstream.shutdown)
+        threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
+        threading.Thread(target=self.proxy.serve_forever, daemon=True).start()
+
+    def graphql(self, payload=None, path="/linear/graphql", token="independent-session-token"):
+        if payload is None:
+            payload = {"query": "query { viewer { id } }"}
+        return urlopen(Request(
+            f"http://127.0.0.1:{self.proxy.server_port}{path}",
+            data=json.dumps(payload).encode(),
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method="POST",
+        ))
+
+    def test_semantic_search_document_and_variables_reach_fixed_destination(self):
+        payload = {
+            "query": "query Search($q: String!) { semanticSearch(query: $q, maxResults: 10) { results { id type } } }",
+            "variables": {"q": "related customer sync failures"},
+            "operationName": "Search",
+        }
+        with self.graphql(payload) as response:
+            result = json.loads(response.read())
+        self.assertEqual(result, self.upstream_payload)
+        self.assertEqual(self.received, [("/graphql", "host-only-linear-secret", payload)])
+        self.assertNotIn("host-only-linear-secret", json.dumps(result))
+
+    def test_document_is_not_filtered_by_operation_type(self):
+        # Linear's Read-only key, rather than a proxy-side query parser, enforces
+        # permissions. This fake upstream accepts the document to prove forwarding.
+        payload = {"query": "mutation Probe { issueUpdate(id: \"x\", input: {}) { success } }"}
+        with self.graphql(payload) as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(self.received[0][2], payload)
+
+    def test_wrong_token_bad_payload_and_other_destinations_never_reach_linear(self):
+        cases = [
+            ({"query": "query { viewer { id } }"}, "/linear/issues/TECH-123", "independent-session-token"),
+            ({"query": "query { viewer { id } }"}, "/linear/graphql?url=https://evil.invalid", "independent-session-token"),
+            ({"query": "query { viewer { id } }"}, "/linear/graphql", "wrong-token"),
+            ({"variables": {}}, "/linear/graphql", "independent-session-token"),
+            ({"query": "query { viewer { id } }", "variables": []}, "/linear/graphql", "independent-session-token"),
+        ]
+        for payload, path, token in cases:
+            with self.subTest(path=path, payload=payload):
+                with self.assertRaises(HTTPError):
+                    self.graphql(payload, path, token)
+        self.assertEqual(self.received, [])
+
+    def test_request_and_response_sizes_are_bounded(self):
+        oversized_request = {"query": "q" * model_proxy.MAX_LINEAR_REQUEST_BYTES}
+        with self.assertRaises(HTTPError) as error:
+            self.graphql(oversized_request)
+        self.assertEqual(error.exception.code, 413)
+        self.assertEqual(self.received, [])
+
+        self.upstream_payload = {"data": {"large": "x" * model_proxy.MAX_LINEAR_RESPONSE_BYTES}}
+        with self.assertRaises(HTTPError) as error:
+            self.graphql()
+        self.assertEqual(error.exception.code, 502)
+        self.assertEqual(len(self.received), 1)
+
+    def test_graphql_errors_are_reported_even_with_http_200_and_redacted(self):
+        self.upstream_payload = {"data": {"semanticSearch": None}, "errors": [
+            {"message": "invalid field, token host-only-linear-secret"}
+        ]}
+        with self.graphql() as response:
+            self.assertEqual(response.status, 200)
+            result = json.loads(response.read())
+        self.assertIn("errors", result)
+        self.assertNotIn("host-only-linear-secret", json.dumps(result))
+        self.assertIn("[redacted]", result["errors"][0]["message"])
+
+    def test_http_error_and_redirect_are_reported_without_following(self):
+        self.upstream_status = 400
+        self.upstream_payload = {"errors": [{"message": "invalid query"}]}
+        with self.assertRaises(HTTPError) as error:
+            self.graphql()
+        self.assertEqual(error.exception.code, 400)
+        self.assertEqual(json.loads(error.exception.read())["errors"][0]["message"], "invalid query")
+
+        self.upstream_status = 302
+        self.redirect_url = f"http://127.0.0.1:{self.upstream.server_port}/other"
+        with self.assertRaises(HTTPError) as error:
+            self.graphql()
+        self.assertEqual(error.exception.code, 502)
+        self.assertEqual(len(self.received), 2)
+
+    def test_non_json_transport_error_keeps_http_status(self):
+        self.upstream_status = 429
+        self.upstream_raw = b"rate limited"
+        with self.assertRaises(HTTPError) as error:
+            self.graphql()
+        self.assertEqual(error.exception.code, 429)
+        self.assertIn("HTTP 429", json.loads(error.exception.read())["error"])
+
+    def test_unset_key_disables_linear(self):
+        self.proxy.linear_key = ""
+        with self.assertRaises(HTTPError) as error:
+            self.graphql()
+        self.assertEqual(error.exception.code, 404)
+        self.assertEqual(self.received, [])
+
+
 class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="pi-review-boundary-")
@@ -218,6 +370,17 @@ elif args[0] == 'run':
     mounts = [args[index + 1] for index, arg in enumerate(args[:-1]) if arg == '--mount']
     workspace = next(m for m in mounts if 'target=/workspace' in m)
     snapshot = pathlib.Path(workspace.split(',')[1].removeprefix('source='))
+    context = next(m for m in mounts if 'target=/review/context' in m)
+    context_dir = pathlib.Path(context.split(',')[1].removeprefix('source='))
+    (capture / 'linear-boundary.json').write_text(json.dumps({
+        'available': (context_dir / 'linear.json').exists(),
+        'key_in_mounts': any(
+            os.environ['LINEAR_API_KEY'].encode() in file.read_bytes()
+            for mount in mounts
+            for file in pathlib.Path(mount.split(',')[1].removeprefix('source=')).rglob('*')
+            if os.environ.get('LINEAR_API_KEY') and file.is_file()
+        ),
+    }))
     (capture / 'snapshot.json').write_text(json.dumps({
         'has_source': (snapshot / 'src/main.py').exists(),
         'has_git': (snapshot / '.git').exists(),
@@ -228,6 +391,7 @@ else:
     raise SystemExit('Unexpected docker call: ' + repr(args))
 ''')
         self.environment = dict(os.environ)
+        self.environment.pop("LINEAR_API_KEY", None)
         self.environment.update({
             "PATH": str(self.bin_dir) + os.pathsep + os.environ["PATH"],
             "RUNNER_TEMP": str(self.root),
@@ -271,6 +435,21 @@ else:
         })
         self.assertEqual(json.loads((self.capture / "posted.json").read_text())["commit_id"], self.head)
         self.assertEqual((self.capture / "posted-target").read_text(), "repos/example/repo/pulls/123/reviews")
+        self.assertEqual(json.loads((self.capture / "linear-boundary.json").read_text()), {
+            "available": False, "key_in_mounts": False,
+        })
+
+    def test_optional_linear_key_stays_on_host(self):
+        linear_secret = "linear-secret-" + os.urandom(16).hex()
+        result = self.run_launcher(LINEAR_API_KEY=linear_secret)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.capture / "docker-args.json").read_text())
+        self.assertNotIn(linear_secret, json.dumps(args))
+        self.assertFalse(any("LINEAR_API_KEY" in arg for arg in args))
+        self.assertNotIn(linear_secret, result.stdout + result.stderr)
+        self.assertEqual(json.loads((self.capture / "linear-boundary.json").read_text()), {
+            "available": True, "key_in_mounts": False,
+        })
 
     def test_changed_head_prevents_post(self):
         result = self.run_launcher(FAKE_STALE="1")

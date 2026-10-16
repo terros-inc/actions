@@ -42,6 +42,7 @@ jobs:
       - uses: terros-inc/actions/pi-code-review@main
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }} # optional
         with:
           model: openrouter/anthropic/claude-sonnet-4.6
 ```
@@ -57,6 +58,19 @@ forwards only OpenRouter chat-completion requests. Pi receives a temporary
 proxy token and never receives the provider or GitHub token. Its container has
 no runner checkout, `.git` directory, or Docker socket.
 
+For optional Linear context, create a personal Linear API key with only the
+`Read` permission and limit it to the teams needed for reviews. Store it as a
+GitHub repository or organization secret named `LINEAR_API_KEY`, then pass it
+through the step environment as shown above. Workspace admins may disable API
+key creation; a key can also access private teams available to its owner, so
+select only the needed teams. If the secret is unset, the review continues
+without Linear. With it set, Pi can submit GraphQL documents and variables to
+a host-side proxy whose only upstream destination is Linear's GraphQL API. This
+includes Linear's native `semanticSearch` query for natural-language discovery
+across issues, projects, initiatives, and documents. Linear enforces read-only
+access through the key's permission; the proxy bounds request and response
+sizes and the timeout. The Linear key never enters the container or its mounts.
+
 `github_token` defaults to the workflow token. The repository must allow GitHub
 Actions to create and approve pull requests, and the token needs
 `pull-requests: write`. Supply a GitHub App token or PAT through `github_token`
@@ -68,3 +82,8 @@ References: [Pi CLI](https://github.com/earendil-works/pi/blob/v1.1.0/packages/c
 [GitHub inline comment API](https://docs.github.com/en/rest/pulls/comments#create-a-review-comment-for-a-pull-request),
 [GitHub review API](https://docs.github.com/en/rest/pulls/reviews#create-a-review-for-a-pull-request),
 and [workflow review permissions](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#preventing-github-actions-from-creating-or-approving-pull-requests).
+Linear setup: [API key permissions](https://linear.app/docs/api-and-webhooks),
+[GraphQL authentication](https://linear.app/developers/graphql), and
+[private-team access](https://linear.app/docs/private-teams). See Linear's
+[semantic search schema](https://github.com/linear/linear/blob/master/packages/sdk/src/schema.graphql)
+for query fields and result types.
