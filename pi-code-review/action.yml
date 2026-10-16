@@ -1,0 +1,71 @@
+name: "Pi Code Review"
+description: "Review a pull request with Pi and publish findings or approval through the GitHub CLI"
+branding:
+  icon: "check-circle"
+  color: "purple"
+
+inputs:
+  model:
+    description: "OpenRouter model in openrouter/model format (e.g., openrouter/anthropic/claude-sonnet-4.6)"
+    required: true
+
+  github_token:
+    description: "Token with pull requests write permission. Use a GitHub App token or PAT when GITHUB_TOKEN reviews are restricted."
+    required: false
+    default: ${{ github.token }}
+
+  pr_number:
+    description: "Pull request number. Defaults to the pull request in the workflow event."
+    required: false
+    default: ${{ github.event.pull_request.number }}
+
+  head_sha:
+    description: "PR head commit to review. The caller must check out this exact commit."
+    required: false
+    default: ${{ github.event.pull_request.head.sha }}
+
+  pi_version:
+    description: "Pi npm package version"
+    required: false
+    default: "1.1.0"
+
+  node_version:
+    description: "Node.js version (Pi requires at least 22.19)"
+    required: false
+    default: "24"
+
+  thinking:
+    description: "Thinking level: off, minimal, low, medium, high, xhigh, or max"
+    required: false
+    default: "high"
+
+  prompt:
+    description: "Additional review guidance appended to the built-in code review instructions"
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Build isolated Pi runner
+      shell: bash
+      env:
+        PI_VERSION: ${{ inputs.pi_version }}
+        NODE_VERSION: ${{ inputs.node_version }}
+        PI_REVIEW_IMAGE: pi-code-review:${{ github.run_id }}-${{ github.run_attempt }}
+        REVIEW_ACTION_PATH: ${{ github.action_path }}
+      run: docker build --build-arg "PI_VERSION=$PI_VERSION" --build-arg "NODE_VERSION=$NODE_VERSION" --tag "$PI_REVIEW_IMAGE" "$REVIEW_ACTION_PATH"
+
+    - name: Review pull request with Pi
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        GH_PROMPT_DISABLED: "1"
+        PI_REVIEW_IMAGE: pi-code-review:${{ github.run_id }}-${{ github.run_attempt }}
+        PI_MODEL: ${{ inputs.model }}
+        PI_THINKING: ${{ inputs.thinking }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+        HEAD_SHA: ${{ inputs.head_sha }}
+        REVIEW_REPOSITORY: ${{ github.repository }}
+        REVIEW_PROMPT: ${{ inputs.prompt }}
+        REVIEW_ACTION_PATH: ${{ github.action_path }}
+      run: bash "$REVIEW_ACTION_PATH/review.sh"
