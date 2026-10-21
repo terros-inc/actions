@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # This repository is public, so fork PRs run here: keep CI on GitHub-hosted runners, never
+  # self-hosted ones.
+  drive-sync:
+    name: Test drive-sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s drive-sync -v
+
+  pi-code-review:
+    name: Test pi-code-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s pi-code-review -v
+
+  # The single check the default-branch ruleset requires. It passes only when every test job
+  # succeeded, so a skipped job cannot satisfy it either.
+  ci-complete:
+    name: CI complete
+    needs: [drive-sync, pi-code-review]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: exit 1
