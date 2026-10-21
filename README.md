@@ -120,7 +120,7 @@ permissions:
   id-token: write
 jobs:
   drive-sync:
-    runs-on: ubuntu-latest
+    runs-on: "runs-on=${{ github.run_id }}/pool=review-small-arm64"
     environment: drive-sync
     timeout-minutes: 10
     concurrency:
@@ -139,8 +139,11 @@ jobs:
           all: ${{ inputs.all == true }}
 ```
 
-The job needs Bash, Git, Python 3 and `gh`. It exits before authenticating when no tagged file
-changed, and fails if one did but an input is empty.
+Run the sync on the org's RunsOn self-hosted runners, as above, not on GitHub-hosted
+`ubuntu-latest`: it starts on every Markdown push to `main`, and RunsOn keeps those runs off the
+Actions minutes budget. This repository's own CI stays on GitHub-hosted runners because the
+repository is public. The job needs Bash, Git, Python 3 and `gh`. It exits before authenticating
+when no tagged file changed, and fails if one did but an input is empty.
 
 Because the caller's own workflow runs the action, the OIDC token's `job_workflow_ref` is
 `<owner>/<repo>/.github/workflows/drive-sync.yml@refs/heads/main`, whatever action SHA it pins. Run
