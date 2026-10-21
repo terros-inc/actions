@@ -1,0 +1,89 @@
+name: Drive Sync
+description: >-
+  Publish Markdown files tagged with `drive: <folder>` frontmatter as Google Docs in that
+  top-level folder of a Google shared drive. One-way, repo to Drive; see drive_sync.py for the rules.
+
+inputs:
+  drive-id:
+    description: ID of the shared drive whose top-level folders the `drive` tag names.
+    required: true
+  wif-provider:
+    description: Full resource name of the Workload Identity Federation provider.
+    required: false
+    default: ''
+  service-account:
+    description: Email of the Google service account to impersonate.
+    required: false
+    default: ''
+  all:
+    description: Sync every tagged file instead of only those changed since the last successful sync.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Find the last synced commit
+      id: base
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        WORKFLOW_REF: ${{ github.workflow_ref }}
+        BRANCH: ${{ github.ref_name }}
+        SHA: ${{ github.sha }}
+        PUSH_BEFORE_SHA: ${{ github.event.before }}
+      run: |
+        # GitHub keeps only the newest pending run in a concurrency group, and a run can fail
+        # before Drive is set up, so diff from the last successful sync rather than only this push.
+        workflow_file="${WORKFLOW_REF%@*}"
+        workflow_file="${workflow_file##*/}"
+        base=$(gh run list --repo "$REPO" --workflow "$workflow_file" --branch "$BRANCH" \
+          --status success --limit 1 --json headSha --jq '.[0].headSha // ""' || true)
+        if [ -z "$base" ] || ! git merge-base --is-ancestor "$base" "$SHA" 2>/dev/null; then
+          base="$PUSH_BEFORE_SHA"
+        fi
+        echo "Syncing changes from ${base:-(none: every tagged file)} to $SHA"
+        echo "sha=$base" >> "$GITHUB_OUTPUT"
+
+    - name: Plan
+      id: plan
+      shell: bash
+      env:
+        BEFORE: ${{ steps.base.outputs.sha }}
+        ALL: ${{ inputs.all == 'true' && '--all' || '' }}
+        DRIVE_ID: ${{ inputs.drive-id }}
+      run: >-
+        python3 "$GITHUB_ACTION_PATH/drive_sync.py" --plan-only $ALL
+        --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA" --before "$BEFORE" --drive-id "$DRIVE_ID"
+
+    # Callers usually pass repository or organization variables, which are empty when unset.
+    - name: Check Google configuration
+      if: steps.plan.outputs.has_work == 'true' && (inputs.drive-id == '' || inputs.wif-provider == '' || inputs.service-account == '')
+      shell: bash
+      run: |
+        echo "::error::Tagged Markdown changed, but drive-id, wif-provider or service-account is empty. Set the variables the calling workflow passes to them."
+        exit 1
+
+    - name: Authenticate to Google
+      id: auth
+      if: steps.plan.outputs.has_work == 'true'
+      uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+      with:
+        workload_identity_provider: ${{ inputs.wif-provider }}
+        service_account: ${{ inputs.service-account }}
+        token_format: access_token
+        access_token_scopes: https://www.googleapis.com/auth/drive
+        create_credentials_file: false
+
+    - name: Publish to Google Drive
+      if: steps.plan.outputs.has_work == 'true'
+      shell: bash
+      env:
+        DRIVE_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        BEFORE: ${{ steps.base.outputs.sha }}
+        ALL: ${{ inputs.all == 'true' && '--all' || '' }}
+        DRIVE_ID: ${{ inputs.drive-id }}
+      run: >-
+        python3 "$GITHUB_ACTION_PATH/drive_sync.py" $ALL
+        --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA" --before "$BEFORE" --drive-id "$DRIVE_ID"

@@ -3,6 +3,10 @@
 - [opencode](opencode/action.yml) — Run OpenCode in GitHub Actions
 - [open-code-review](open-code-review/action.yml) — AI-powered PR code review using OpenCodeReview
 - [pi-code-review](pi-code-review/action.yml) — PR review with Pi, including inline findings and approval through `gh`
+- [drive-sync](drive-sync/action.yml) — Publish Markdown files tagged `drive: <folder>` as Google Docs in a shared drive
+
+Pin every action by full commit SHA, never `@main`, so a caller runs only the code it reviewed.
+CI (`.github/workflows/ci.yml`) runs each action's tests; its `CI complete` job is the required check.
 
 ## Pi code review
 
@@ -87,3 +91,69 @@ Linear setup: [API key permissions](https://linear.app/docs/api-and-webhooks),
 [private-team access](https://linear.app/docs/private-teams). See Linear's
 [semantic search schema](https://github.com/linear/linear/blob/master/packages/sdk/src/schema.graphql)
 for query fields and result types.
+
+## Drive sync
+
+Publishes Markdown files whose frontmatter has `drive: <folder>` as Google Docs in that top-level
+folder of a Google shared drive, using the Drive API's own Markdown import. One-way, repo to Drive;
+it never deletes docs or creates folders. [`drive_sync.py`](drive-sync/drive_sync.py) documents the
+rules. Auth is GitHub OIDC through Workload Identity Federation (WIF); there is no key file.
+
+The calling repository adds `.github/workflows/drive-sync.yml` and uses the action directly, pinned
+by commit SHA. There is no reusable workflow in between, so nothing in the chain follows a branch:
+
+```yaml
+name: Drive Sync
+on:
+  push:
+    branches: [main]
+    paths: ['**.md']
+  workflow_dispatch:
+    inputs:
+      all:
+        description: Sync every tagged file, not only changed ones
+        type: boolean
+        default: false
+permissions:
+  contents: read
+  actions: read   # finds the last successful sync with `gh run list`
+  id-token: write
+jobs:
+  drive-sync:
+    runs-on: ubuntu-latest
+    environment: drive-sync
+    timeout-minutes: 10
+    concurrency:
+      group: drive-sync-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0   # the sync diffs against the last synced commit
+          persist-credentials: false
+      - uses: terros-inc/actions/drive-sync@<full commit SHA>
+        with:
+          drive-id: ${{ vars.DRIVE_SYNC_DRIVE_ID }}
+          wif-provider: ${{ vars.DRIVE_SYNC_WIF_PROVIDER }}
+          service-account: ${{ vars.DRIVE_SYNC_SERVICE_ACCOUNT }}
+          all: ${{ inputs.all == true }}
+```
+
+The job needs Bash, Git, Python 3 and `gh`. It exits before authenticating when no tagged file
+changed, and fails if one did but an input is empty.
+
+Because the caller's own workflow runs the action, the OIDC token's `job_workflow_ref` is
+`<owner>/<repo>/.github/workflows/drive-sync.yml@refs/heads/main`, whatever action SHA it pins. Run
+the job in an environment (`drive-sync` above) so its `sub` does not match trust granted to the
+branch, and give the Google WIF provider an attribute condition that accepts only that workflow on
+the default branch of the listed repositories:
+
+```
+assertion.repository_owner == '<owner>' &&
+assertion.repository in ['<owner>/<repo-a>', '<owner>/<repo-b>'] &&
+assertion.job_workflow_ref == assertion.repository + '/.github/workflows/drive-sync.yml@refs/heads/main' &&
+assertion.environment == 'drive-sync'
+```
+
+Bumping the action SHA in a caller is a reviewed change to that file on the default branch, so the
+condition does not change when the pin moves.
