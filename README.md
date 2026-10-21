@@ -150,9 +150,11 @@ the default branch of the listed repositories:
 
 ```
 assertion.repository_owner == '<owner>' &&
-assertion.repository in ['<owner>/<repo-a>', '<owner>/<repo-b>'] &&
-assertion.job_workflow_ref == assertion.repository + '/.github/workflows/drive-sync.yml@refs/heads/main' &&
-assertion.environment == 'drive-sync'
+assertion.environment == 'drive-sync' &&
+assertion.job_workflow_ref in [
+  '<owner>/<repo-a>/.github/workflows/drive-sync.yml@refs/heads/main',
+  '<owner>/<repo-b>/.github/workflows/drive-sync.yml@refs/heads/main'
+]
 ```
 
 Bumping the action SHA in a caller is a reviewed change to that file on the default branch, so the
