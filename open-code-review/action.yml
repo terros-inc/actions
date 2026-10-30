@@ -56,14 +56,17 @@ runs:
 
     - name: Install OpenCodeReview
       shell: bash
-      run: npm install -g @alibaba-group/open-code-review
+      run: npm install -g @alibaba-group/open-code-review@1.13.3
 
     - name: Configure and run OpenCodeReview
       id: review
       shell: bash
+      # The key comes in through env so it never becomes part of the generated script text.
+      env:
+        OPENROUTER_API_KEY: ${{ inputs.openrouter_api_key }}
       run: |
         ocr config set llm.url https://openrouter.ai/api/v1/chat/completions
-        ocr config set llm.auth_token ${{ inputs.openrouter_api_key }}
+        ocr config set llm.auth_token "$OPENROUTER_API_KEY"
         ocr config set llm.model ${{ inputs.model }}
         ocr config set llm.use_anthropic false
         if [ "${{ inputs.reasoning }}" = "true" ]; then
