@@ -10,7 +10,7 @@ inputs:
     required: true
 
   github_token:
-    description: "Token with pull requests write permission. Use a GitHub App token or PAT when GITHUB_TOKEN reviews are restricted."
+    description: "Token with pull requests write permission. Checks and statuses read permissions are optional for CI context. Use a GitHub App token or PAT when GITHUB_TOKEN reviews are restricted."
     required: false
     default: ${{ github.token }}
 

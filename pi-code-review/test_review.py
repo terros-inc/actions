@@ -323,12 +323,23 @@ if args[:2] == ['pr', 'view']:
     counter = capture / 'views'
     views = int(counter.read_text()) + 1 if counter.exists() else 1
     counter.write_text(str(views))
+    fields = args[args.index('--json') + 1].split(',')
+    if os.environ.get('FAKE_CI_DENIED') and 'statusCheckRollup' in fields:
+        print('GraphQL: Resource not accessible by integration (statusCheckRollup)', file=sys.stderr)
+        raise SystemExit(1)
+    if os.environ.get('FAKE_VIEW_FAILURE') == str(views):
+        print('Synthetic required metadata failure', file=sys.stderr)
+        raise SystemExit(1)
     if views > 1 and os.environ.get('FAKE_STALE'):
         head = 'b' * 40
-    print(json.dumps({'title':'Fixture','body':'','state':'OPEN','headRefOid':head,'isDraft':False,'files':[{'path':'src/main.py'}]}))
+    state = 'CLOSED' if os.environ.get('FAKE_CLOSED') == str(views) else 'OPEN'
+    print(json.dumps({'title':'Fixture','body':'','state':state,'headRefOid':head,'isDraft':False,'files':[{'path':'src/main.py'}]}))
 elif args[:2] == ['pr', 'diff']:
     print('diff --git a/src/main.py b/src/main.py')
 elif args[:2] == ['pr', 'checks']:
+    if os.environ.get('FAKE_CI_DENIED'):
+        print('GraphQL: Resource not accessible by integration', file=sys.stderr)
+        raise SystemExit(1)
     print('checks passed')
 elif args[:2] == ['api', '--paginate']:
     pass
@@ -372,6 +383,7 @@ elif args[0] == 'run':
     snapshot = pathlib.Path(workspace.split(',')[1].removeprefix('source='))
     context = next(m for m in mounts if 'target=/review/context' in m)
     context_dir = pathlib.Path(context.split(',')[1].removeprefix('source='))
+    (capture / 'checks.txt').write_text((context_dir / 'checks.txt').read_text())
     (capture / 'linear-boundary.json').write_text(json.dumps({
         'available': (context_dir / 'linear.json').exists(),
         'key_in_mounts': any(
@@ -455,6 +467,43 @@ else:
         result = self.run_launcher(FAKE_STALE="1")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.capture / "posted.json").exists())
+
+    def test_missing_ci_permissions_still_posts_findings_and_summary(self):
+        result = self.run_launcher(FAKE_CI_DENIED="1", FAKE_RESULT=self.three_findings())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        checks = (self.capture / "checks.txt").read_text()
+        self.assertIn("CI context is unavailable", checks)
+        self.assertIn("Checks command exit status: 1", checks)
+        attempts = json.loads((self.capture / "post-attempts.json").read_text())
+        self.assertEqual([attempt["target"].rsplit("/", 1)[-1] for attempt in attempts],
+                         ["comments", "comments", "comments", "reviews"])
+        self.assertEqual([attempt["payload"]["body"] for attempt in attempts[:3]],
+                         [f"[P1] Finding {index + 1}" for index in range(3)])
+        final = json.loads((self.capture / "posted.json").read_text())
+        self.assertEqual(final["event"], "REQUEST_CHANGES")
+        self.assertEqual(final["commit_id"], self.head)
+
+    def test_required_metadata_failure_prevents_any_post(self):
+        for view in ("1", "2"):
+            with self.subTest(view=view):
+                (self.capture / "views").unlink(missing_ok=True)
+                result = self.run_launcher(FAKE_VIEW_FAILURE=view)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Synthetic required metadata failure", result.stderr)
+                self.assertFalse((self.capture / "post-attempts.json").exists())
+
+    def test_closed_pr_prevents_any_post(self):
+        for view in ("1", "2"):
+            with self.subTest(view=view):
+                (self.capture / "views").unlink(missing_ok=True)
+                result = self.run_launcher(FAKE_CLOSED=view)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.capture / "post-attempts.json").exists())
+
+    def test_initial_head_mismatch_prevents_any_post(self):
+        result = self.run_launcher(FAKE_HEAD="b" * 40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.capture / "post-attempts.json").exists())
 
     def test_agent_cannot_select_a_different_post_target(self):
         malicious = json.dumps({"event": "APPROVE", "body": "Reviewed", "comments": [], "api_url": "https://elsewhere.invalid"})

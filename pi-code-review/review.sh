@@ -45,7 +45,7 @@ mkdir -p "$review_dir/context" "$review_dir/workspace"
 # The host gathers GitHub evidence while authenticated. Pi only reads these
 # files and a fresh snapshot of committed source, never the runner checkout.
 gh pr view "$PR_NUMBER" --repo "$REVIEW_REPOSITORY" \
-  --json title,body,baseRefName,baseRefOid,headRefOid,files,isDraft,state,statusCheckRollup \
+  --json title,body,baseRefName,baseRefOid,headRefOid,files,isDraft,state \
   > "$review_dir/context/pr.json"
 [[ "$(jq -r '.state' "$review_dir/context/pr.json")" == "OPEN" ]] || fail "The pull request is no longer open."
 [[ "$(jq -r '.headRefOid' "$review_dir/context/pr.json")" == "$HEAD_SHA" ]] || fail "The pull request head changed; rerun the review."
@@ -63,6 +63,7 @@ if gh pr checks "$PR_NUMBER" --repo "$REVIEW_REPOSITORY" > "$review_dir/context/
 else
   checks_status=$?
   printf '\nChecks command exit status: %s\n' "$checks_status" >> "$review_dir/context/checks.txt"
+  printf 'CI context is unavailable or incomplete; continuing the review with the available evidence.\n' >> "$review_dir/context/checks.txt"
 fi
 
 git archive "$HEAD_SHA" | tar -x -C "$review_dir/workspace"
