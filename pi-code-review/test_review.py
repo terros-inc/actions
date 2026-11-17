@@ -1,9 +1,11 @@
 """Credential-boundary and publication tests for the Pi review action."""
 
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
+from contextlib import redirect_stderr
 import subprocess
 import tempfile
 import threading
@@ -25,6 +27,54 @@ def load_module(name):
 
 model_proxy = load_module("model_proxy")
 prepare_review = load_module("prepare_review")
+extract_result = load_module("extract_result")
+
+
+class ResultTests(unittest.TestCase):
+    def events(self, content, reason="stop"):
+        return [json.dumps({"type": "agent_end", "messages": [
+            {"role": "assistant", "content": content, "stopReason": reason}
+        ], "willRetry": False}) + "\n"]
+
+    def test_extracts_final_text_after_tool_turns(self):
+        events = self.events([{"type": "text", "text": "Intermediate explanation"}], "toolUse")
+        events += self.events([{"type": "thinking", "thinking": "private reasoning"},
+                               {"type": "text", "text": '{"event":"COMMENT"}'}])
+        self.assertEqual(extract_result.extract(events), '{"event":"COMMENT"}')
+
+    def test_empty_and_reasoning_only_success_are_rejected(self):
+        for content, reason in (([], "stop"), ([{"type": "text", "text": "  "}], "stop"),
+                                ([{"type": "thinking", "thinking": "secret"}], "length")):
+            with self.subTest(content=content, reason=reason):
+                with self.assertRaisesRegex(ValueError, f"stopReason={reason}") as raised:
+                    extract_result.extract(self.events(content, reason))
+                self.assertNotIn("secret", str(raised.exception))
+
+    def test_failed_truncated_and_incomplete_turns_are_rejected(self):
+        for reason in ("error", "aborted", "length", "toolUse", "secret-unknown-reason"):
+            with self.subTest(reason=reason):
+                with self.assertRaises(ValueError) as raised:
+                    extract_result.extract(self.events([{"type": "text", "text": "secret response"}], reason))
+                self.assertNotIn("secret", str(raised.exception))
+        for events in ([], ['{"type":"message_start"}\n'],
+                       [json.dumps({"type": "agent_end", "messages": [], "willRetry": True})]):
+            with self.assertRaises(ValueError):
+                extract_result.extract(events)
+
+    def test_cli_withholds_stderr_and_malformed_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "events").write_text("secret invalid JSON")
+            (root / "stderr").write_text("upstream echoed secret-provider-key")
+            result = subprocess.run([
+                "python3", str(ACTION_DIR / "extract_result.py"), str(root / "events"),
+                str(root / "stderr"), "17", str(root / "result"),
+            ], text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("exit status=17", result.stderr)
+            self.assertIn("invalid JSON event stream", result.stderr)
+            self.assertNotIn("secret", result.stdout + result.stderr)
+            self.assertFalse((root / "result").exists())
 
 
 class PayloadTests(unittest.TestCase):
@@ -85,8 +135,69 @@ class PayloadTests(unittest.TestCase):
 
 
 class ProxyTests(unittest.TestCase):
+    def test_sse_is_forwarded_before_upstream_closes_with_either_framing(self):
+        for chunked in (False, True):
+            with self.subTest(chunked=chunked):
+                release = threading.Event()
+                event = b'data: {"choices":[{"delta":{"content":"private model text"}}]}\n\n'
+
+                class Upstream(BaseHTTPRequestHandler):
+                    protocol_version = "HTTP/1.1"
+
+                    def log_message(self, *args):
+                        pass
+
+                    def do_POST(self):
+                        self.rfile.read(int(self.headers["Content-Length"]))
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream")
+                        if chunked:
+                            self.send_header("Transfer-Encoding", "chunked")
+                        else:
+                            self.send_header("Connection", "close")
+                            self.close_connection = True
+                        self.end_headers()
+                        self.wfile.write(f"{len(event):x}\r\n".encode() + event + b"\r\n" if chunked else event)
+                        self.wfile.flush()
+                        release.wait(5)
+                        if chunked:
+                            self.wfile.write(b"0\r\n\r\n")
+
+                upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+                proxy = ThreadingHTTPServer(("127.0.0.1", 0), model_proxy.Handler)
+                proxy.proxy_token = "scoped-token"
+                proxy.provider_key = "private-provider-key"
+                proxy.model_id = "model"
+                proxy.opener = model_proxy.build_opener(model_proxy.NoRedirect)
+                for server in (upstream, proxy):
+                    threading.Thread(target=server.serve_forever, daemon=True).start()
+                log = io.StringIO()
+                try:
+                    with redirect_stderr(log), patch.object(
+                        model_proxy, "UPSTREAM_URL", f"http://127.0.0.1:{upstream.server_port}/completion"
+                    ):
+                        request = Request(
+                            f"http://127.0.0.1:{proxy.server_port}/v1/chat/completions",
+                            data=b'{"model":"model","stream":true}',
+                            headers={"Authorization": "Bearer scoped-token"},
+                        )
+                        with urlopen(request, timeout=1) as response:
+                            self.assertEqual(response.read1(len(event)), event)
+                            release.set()
+                            self.assertEqual(response.read(), b"")
+                        proxy.shutdown()
+                    self.assertIn("upstream HTTP 200", log.getvalue())
+                    self.assertIn(f"forwarded {len(event)} bytes", log.getvalue())
+                    self.assertNotIn("private", log.getvalue())
+                finally:
+                    release.set()
+                    for server in (proxy, upstream):
+                        server.shutdown()
+                        server.server_close()
+
     def test_proxy_adds_provider_key_only_to_fixed_upstream(self):
         received = []
+        upstream_status = 200
 
         class Upstream(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -94,8 +205,8 @@ class ProxyTests(unittest.TestCase):
 
             def do_POST(self):
                 received.append((self.path, self.headers.get("Authorization")))
-                body = b'{"choices":[]}'
-                self.send_response(200)
+                body = b'{"choices":[]}' if upstream_status == 200 else b'{"error":"private-provider-secret"}'
+                self.send_response(upstream_status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -121,6 +232,16 @@ class ProxyTests(unittest.TestCase):
                     self.assertEqual(response.read(), b'{"choices":[]}')
                 self.assertEqual(received, [("/api/v1/chat/completions", "Bearer real-provider-secret")])
 
+                upstream_status = 429
+                log = io.StringIO()
+                with redirect_stderr(log):
+                    with self.assertRaises(HTTPError) as raised:
+                        urlopen(request)
+                    with raised.exception as response:
+                        self.assertEqual(response.read(), b'{"error":"private-provider-secret"}')
+                self.assertIn("upstream HTTP 429", log.getvalue())
+                self.assertNotIn("secret", log.getvalue())
+
                 for path, authorization, body in [
                     ("/v1/other", "Bearer scoped-token", payload),
                     ("/v1/chat/completions", "Bearer wrong", payload),
@@ -132,7 +253,7 @@ class ProxyTests(unittest.TestCase):
                             data=body,
                             headers={"Authorization": authorization},
                         ))
-                self.assertEqual(len(received), 1)
+                self.assertEqual(len(received), 2)
         finally:
             proxy.shutdown()
             upstream.shutdown()
@@ -398,7 +519,13 @@ elif args[0] == 'run':
         'has_git': (snapshot / '.git').exists(),
         'has_runner_secret': (snapshot / 'runner-secret.txt').exists(),
     }))
-    print(os.environ['FAKE_RESULT'])
+    print(os.environ.get('FAKE_STDERR', ''), end='', file=sys.stderr)
+    if not os.environ.get('FAKE_NO_EVENTS'):
+        print(json.dumps({'type':'agent_end', 'willRetry':False, 'messages':[
+            {'role':'assistant', 'stopReason':os.environ.get('FAKE_STOP_REASON','stop'),
+             'content':[{'type':'text','text':os.environ['FAKE_RESULT']}]}
+        ]}))
+    raise SystemExit(int(os.environ.get('FAKE_EXIT','0')))
 else:
     raise SystemExit('Unexpected docker call: ' + repr(args))
 ''')
@@ -467,6 +594,24 @@ else:
         result = self.run_launcher(FAKE_STALE="1")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.capture / "posted.json").exists())
+
+    def test_empty_success_fails_before_json_validation_or_publication(self):
+        result = self.run_launcher(FAKE_RESULT="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Pi process exit status=0", result.stderr)
+        self.assertIn("stopReason=stop; text characters=0", result.stderr)
+        self.assertNotIn("cannot read JSON", result.stderr)
+        self.assertFalse((self.capture / "post-attempts.json").exists())
+
+    def test_failed_pi_process_and_partial_output_cannot_post(self):
+        for overrides in ({"FAKE_EXIT": "17"}, {"FAKE_STOP_REASON": "error"},
+                          {"FAKE_STOP_REASON": "length"}, {"FAKE_NO_EVENTS": "1"}):
+            with self.subTest(overrides=overrides):
+                result = self.run_launcher(FAKE_STDERR="secret upstream response", **overrides)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Pi review failed", result.stderr)
+                self.assertNotIn("secret upstream response", result.stdout + result.stderr)
+                self.assertFalse((self.capture / "post-attempts.json").exists())
 
     def test_missing_ci_permissions_still_posts_findings_and_summary(self):
         result = self.run_launcher(FAKE_CI_DENIED="1", FAKE_RESULT=self.three_findings())

@@ -5,6 +5,8 @@ import argparse
 import hmac
 import json
 import os
+import sys
+from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -15,6 +17,7 @@ MAX_REQUEST_BYTES = 16 * 1024 * 1024
 MAX_LINEAR_REQUEST_BYTES = 256 * 1024
 MAX_LINEAR_RESPONSE_BYTES = 2 * 1024 * 1024
 LINEAR_TIMEOUT_SECONDS = 30
+MODEL_TIMEOUT_SECONDS = 180
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -161,25 +164,36 @@ class Handler(BaseHTTPRequestHandler):
             method="POST",
         )
         try:
-            upstream_response = self.server.opener.open(upstream_request, timeout=180)
+            upstream_response = self.server.opener.open(upstream_request, timeout=MODEL_TIMEOUT_SECONDS)
         except HTTPError as error:
             upstream_response = error
-        except URLError:
+        except (URLError, TimeoutError, OSError, HTTPException):
+            print("Model proxy: transport failed", file=sys.stderr, flush=True)
             return self.respond(502, "OpenRouter could not be reached")
 
         with upstream_response:
+            print(f"Model proxy: upstream HTTP {upstream_response.status}", file=sys.stderr, flush=True)
             self.send_response(upstream_response.status)
             self.send_header(
                 "Content-Type",
                 upstream_response.headers.get("Content-Type", "application/json"),
             )
+            self.send_header("Connection", "close")
             self.end_headers()
+            forwarded = 0
             try:
-                while chunk := upstream_response.read(65536):
+                # read() waits for 64 KiB or EOF and buffers SSE heartbeats.
+                # read1() forwards bytes as they arrive, even on a long stream.
+                while chunk := upstream_response.read1(65536):
                     self.wfile.write(chunk)
                     self.wfile.flush()
+                    forwarded += len(chunk)
             except (BrokenPipeError, ConnectionResetError):
-                pass
+                print("Model proxy: client disconnected", file=sys.stderr, flush=True)
+            except (URLError, TimeoutError, OSError, HTTPException):
+                print("Model proxy: stream failed", file=sys.stderr, flush=True)
+            finally:
+                print(f"Model proxy: forwarded {forwarded} bytes", file=sys.stderr, flush=True)
 
 
 def main():

@@ -132,6 +132,7 @@ fi
 # GH_TOKEN, OPENROUTER_API_KEY, LINEAR_API_KEY, the runner checkout, and
 # Docker's socket stay out. Linear reuses the independent, temporary model
 # proxy token; its actual API key remains in the host proxy process.
+pi_status=0
 docker run --rm --read-only --user "$(id -u):$(id -g)" \
   --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 \
   --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
@@ -141,7 +142,23 @@ docker run --rm --read-only --user "$(id -u):$(id -g)" \
   --env PI_MODEL_ID="review-proxy/$openrouter_model" \
   --env PI_THINKING="$PI_THINKING" \
   "$PI_REVIEW_IMAGE" /bin/bash /review/action/run-pi.sh \
-  > "$review_dir/result.json"
+  > "$review_dir/events.jsonl" 2> "$review_dir/pi.stderr" || pi_status=$?
+
+if ! python3 "$REVIEW_ACTION_PATH/extract_result.py" \
+  "$review_dir/events.jsonl" "$review_dir/pi.stderr" "$pi_status" "$review_dir/result.json"; then
+  # Only allowlisted proxy metadata is logged; upstream bodies and Pi's raw
+  # stderr can contain secrets and must never be copied into the job log.
+  python3 - "$review_dir/proxy.log" <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8", errors="replace") as log:
+    for line in log:
+        if re.fullmatch(r"Model proxy: (?:upstream HTTP [1-5][0-9]{2}|transport failed|stream failed|client disconnected|forwarded [0-9]+ bytes)\n", line):
+            print(line, end="", file=sys.stderr)
+PY
+  fail "Pi did not produce a complete review; see the safe diagnostics above."
+fi
 
 # Validate the agent's untrusted output and fix the target on the host. Pi's
 # text never becomes a shell command or an arbitrary GitHub API operation.
