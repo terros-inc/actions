@@ -16,8 +16,16 @@ head commit. Pi returns a structured review; the host validates it, posts each
 inline finding separately with `gh api`, then submits the final summary and
 verdict. Failed inline posts are recorded and included in the summary without
 an automatic retry. The host checks the PR head before and after the review.
-CI results are review context; this action does not require checks to pass
-before approving. Repository-required checks continue to gate merging.
+CI results are optional review context. If CI status cannot be read, the action
+records that context is unavailable and continues posting findings and the final
+review. Checks do not have to pass before approving. Repository-required checks
+continue to gate merging.
+
+The action requires a successful Pi process and a completed final assistant turn
+with nonblank text and stop reason `stop` before validating and posting the
+review. Empty, incomplete, or failed output aborts publication. Failure diagnostics
+include process status, stderr byte count, and available completion or proxy
+metadata; raw Pi stderr and upstream response bodies are withheld from job logs.
 
 ```yaml
 name: Pi code review
@@ -28,8 +36,8 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  checks: read
-  statuses: read
+  checks: read # optional CI context
+  statuses: read # optional CI context
 
 jobs:
   review:
@@ -43,7 +51,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: terros-inc/actions/pi-code-review@main
+      - uses: terros-inc/actions/pi-code-review@<full commit SHA>
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }} # optional
@@ -81,6 +89,12 @@ Actions to create and approve pull requests, and the token needs
 when repository policy requires a different reviewer identity. Fork PR workflows
 typically lack secrets and write permissions, so the example skips them. For
 events without a pull request payload, pass `pr_number` and `head_sha` explicitly.
+
+Posting reviews does not require checks or statuses permissions. To include CI
+context, grant both `checks: read` and `statuses: read` to the token used by the
+action: set workflow permissions for `GITHUB_TOKEN`, or have an admin enable
+Checks and Commit statuses read permissions for a GitHub App token. Required PR
+metadata must still be readable; failures to load it abort the action.
 
 References: [Pi CLI](https://github.com/earendil-works/pi/blob/v1.1.0/packages/coding-agent/docs/cli.md),
 [GitHub inline comment API](https://docs.github.com/en/rest/pulls/comments#create-a-review-comment-for-a-pull-request),

@@ -7,7 +7,7 @@ export XDG_CACHE_HOME=/tmp/pi-cache
 mkdir -p "$PI_CODING_AGENT_DIR"
 cp /review/context/models.json "$PI_CODING_AGENT_DIR/models.json"
 
-exec pi --print \
+exec pi --print --mode json \
   --model "$PI_MODEL_ID" \
   --thinking "$PI_THINKING" \
   --no-session \
