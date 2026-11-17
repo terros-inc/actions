@@ -21,6 +21,12 @@ records that context is unavailable and continues posting findings and the final
 review. Checks do not have to pass before approving. Repository-required checks
 continue to gate merging.
 
+The action requires a successful Pi process and a completed final assistant turn
+with nonblank text and stop reason `stop` before validating and posting the
+review. Empty, incomplete, or failed output aborts publication. Failure diagnostics
+include process status, stderr byte count, and available completion or proxy
+metadata; raw Pi stderr and upstream response bodies are withheld from job logs.
+
 ```yaml
 name: Pi code review
 on:
@@ -45,7 +51,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: terros-inc/actions/pi-code-review@main
+      - uses: terros-inc/actions/pi-code-review@<full commit SHA>
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }} # optional
