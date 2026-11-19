@@ -70,6 +70,29 @@ forwards only OpenRouter chat-completion requests. Pi receives a temporary
 proxy token and never receives the provider or GitHub token. Its container has
 no runner checkout, `.git` directory, or Docker socket.
 
+To replace the code review focus for documentation or other repository types,
+set `review_guidance` in the caller's `with:` block. Omitted or whitespace-only
+guidance keeps the built-in code focus. The existing `prompt` input still appends
+additional guidance with either focus. The credential boundaries, JSON output,
+severity labels, high-confidence findings rule, and approval constraints apply
+to both modes. Custom guidance uses “blocking issues” for the request-changes
+verdict, so repository policy violations can block a documentation PR.
+
+```yaml
+with:
+  model: openrouter/anthropic/claude-sonnet-4.6
+  review_guidance: |
+    Review these documentation changes for accuracy, durable knowledge,
+    and compliance with our contribution policy. Report concrete policy
+    violations. Avoid mechanical checks already covered by CI.
+  prompt: "Explain any evidence that could not be verified."
+```
+
+Treat `review_guidance` and `prompt` as trusted workflow configuration. For
+privileged events such as `pull_request_target`, keep them in the default-branch
+workflow. Do not populate them from PR descriptions, comments, or files checked
+out from the PR head. Repository files remain review evidence.
+
 For optional Linear context, create a personal Linear API key with only the
 `Read` permission and limit it to the teams needed for reviews. Store it as a
 GitHub repository or organization secret named `LINEAR_API_KEY`, then pass it

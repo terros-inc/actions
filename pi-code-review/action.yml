@@ -39,8 +39,12 @@ inputs:
     required: false
     default: "high"
 
+  review_guidance:
+    description: "Review guidance that replaces the built-in code review focus. Supply trusted workflow configuration, never PR-controlled text. Blank uses the built-in focus."
+    required: false
+
   prompt:
-    description: "Additional review guidance appended to the built-in code review instructions"
+    description: "Additional review guidance appended to the selected review instructions"
     required: false
 
 runs:
@@ -66,6 +70,7 @@ runs:
         PR_NUMBER: ${{ inputs.pr_number }}
         HEAD_SHA: ${{ inputs.head_sha }}
         REVIEW_REPOSITORY: ${{ github.repository }}
+        REVIEW_GUIDANCE: ${{ inputs.review_guidance }}
         REVIEW_PROMPT: ${{ inputs.prompt }}
         REVIEW_ACTION_PATH: ${{ github.action_path }}
       run: bash "$REVIEW_ACTION_PATH/review.sh"
