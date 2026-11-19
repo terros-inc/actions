@@ -28,6 +28,7 @@ def load_module(name):
 model_proxy = load_module("model_proxy")
 prepare_review = load_module("prepare_review")
 extract_result = load_module("extract_result")
+prepare_prompt = load_module("prepare_prompt")
 
 
 class ResultTests(unittest.TestCase):
@@ -77,6 +78,16 @@ class ResultTests(unittest.TestCase):
             self.assertFalse((root / "result").exists())
 
 
+class PromptTests(unittest.TestCase):
+    def test_guidance_is_literal_even_when_it_contains_template_tokens(self):
+        template = "{{REVIEW_GUIDANCE}} / {{SUBJECT}} / {{DEFECT}} / {{BLOCKING_DEFECTS}}"
+        guidance = "Review wiki policy. Keep {{SUBJECT}} and $(touch /tmp/unwanted) literal."
+        self.assertEqual(
+            prepare_prompt.assemble(template, guidance),
+            guidance + " / changes / issue / issues",
+        )
+
+
 class PayloadTests(unittest.TestCase):
     def setUp(self):
         self.pr = {"isDraft": False, "files": [{"path": "src/main.py"}]}
@@ -91,6 +102,17 @@ class PayloadTests(unittest.TestCase):
         payload = prepare_review.prepare(result, self.pr, self.head)
         self.assertEqual(payload["commit_id"], self.head)
         self.assertEqual(payload["comments"], result["comments"])
+
+    def test_markdown_and_non_markdown_findings_accept_either_diff_side(self):
+        for path, side in (("notes/decision.md", "RIGHT"), ("old-note.md", "LEFT"),
+                           ("_inbox/capture.log", "RIGHT"), ("cleanup.sh", "LEFT")):
+            with self.subTest(path=path, side=side):
+                result = {
+                    "event": "REQUEST_CHANGES", "body": "Policy violation",
+                    "comments": [{"path": path, "line": 1, "side": side, "body": "[P1] Policy issue"}],
+                }
+                payload = prepare_review.prepare(result, {"files": [{"path": path}]}, self.head)
+                self.assertEqual(payload["comments"], result["comments"])
 
     def test_agent_cannot_choose_arbitrary_api_target_or_file(self):
         base = {"event": "COMMENT", "body": "Reviewed", "comments": []}
@@ -504,6 +526,8 @@ elif args[0] == 'run':
     snapshot = pathlib.Path(workspace.split(',')[1].removeprefix('source='))
     context = next(m for m in mounts if 'target=/review/context' in m)
     context_dir = pathlib.Path(context.split(',')[1].removeprefix('source='))
+    (capture / 'prompt.md').write_text((context_dir / 'prompt.md').read_text())
+    (capture / 'request.txt').write_text((context_dir / 'request.txt').read_text())
     (capture / 'checks.txt').write_text((context_dir / 'checks.txt').read_text())
     (capture / 'linear-boundary.json').write_text(json.dumps({
         'available': (context_dir / 'linear.json').exists(),
@@ -577,6 +601,31 @@ else:
         self.assertEqual(json.loads((self.capture / "linear-boundary.json").read_text()), {
             "available": False, "key_in_mounts": False,
         })
+
+    def test_default_and_blank_guidance_keep_code_focus_and_appended_prompt(self):
+        for guidance in ("", "  \n"):
+            with self.subTest(guidance=guidance):
+                result = self.run_launcher(REVIEW_GUIDANCE=guidance, REVIEW_PROMPT="Check compatibility.")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                prompt = (self.capture / "prompt.md").read_text()
+                self.assertIn("Focus on introduced correctness,", prompt)
+                self.assertIn("actionable blocking bugs", prompt)
+                self.assertIn("Additional review guidance:\nCheck compatibility.", (self.capture / "request.txt").read_text())
+
+    def test_custom_guidance_replaces_focus_and_preserves_review_contract(self):
+        guidance = "Review wiki confidentiality and source links. $(touch unwanted)"
+        result = self.run_launcher(REVIEW_GUIDANCE=guidance, REVIEW_PROMPT="Avoid duplicate CI findings.")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prompt = (self.capture / "prompt.md").read_text()
+        self.assertIn(guidance, prompt)
+        self.assertNotIn("Focus on introduced correctness,", prompt)
+        self.assertNotIn("blocking bugs", prompt)
+        self.assertIn("actionable blocking issues", prompt)
+        self.assertIn("concrete, high-confidence findings", prompt)
+        self.assertIn("An approval must have", prompt)
+        self.assertIn("Do not include credentials or other secrets", prompt)
+        self.assertIn("Avoid duplicate CI findings.", (self.capture / "request.txt").read_text())
+        self.assertFalse((self.repo / "unwanted").exists())
 
     def test_optional_linear_key_stays_on_host(self):
         linear_secret = "linear-secret-" + os.urandom(16).hex()

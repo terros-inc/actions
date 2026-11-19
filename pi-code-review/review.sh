@@ -67,6 +67,7 @@ else
 fi
 
 git archive "$HEAD_SHA" | tar -x -C "$review_dir/workspace"
+python3 "$REVIEW_ACTION_PATH/prepare_prompt.py" "$review_dir/context/prompt.md"
 
 # Only the fixed OpenRouter upstream receives the provider key. The container
 # gets an ephemeral local proxy token and has no GitHub or provider credential.

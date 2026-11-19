@@ -19,5 +19,5 @@ exec pi --print --mode json \
   --no-themes \
   --no-context-files \
   --tools read,bash,grep,find,ls \
-  --append-system-prompt /review/action/prompt.md \
+  --append-system-prompt /review/context/prompt.md \
   "$(cat /review/context/request.txt)"
